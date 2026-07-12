@@ -45,10 +45,17 @@ class PathView(QGraphicsView):
         tr_pen = QPen(TRAVEL_COLOR, 0, Qt.DashLine)
         for a, b in travels:
             sc.addLine(a[0], a[1], b[0], b[1], tr_pen)
+        self.draw_origin()
+        self.fit()
+
+    def draw_origin(self):
+        sc = self.scene()
         sc.addLine(0, 0, 5, 0, QPen(QColor(200, 60, 60), 0))   # X axis, red
         sc.addLine(0, 0, 0, 5, QPen(QColor(60, 160, 60), 0))   # Y axis, green
-        rect = sc.itemsBoundingRect().adjusted(-10, -10, 10, 10)
-        sc.setSceneRect(rect)
+
+    def fit(self):
+        rect = self.scene().itemsBoundingRect().adjusted(-10, -10, 10, 10)
+        self.scene().setSceneRect(rect)
         self.fitInView(rect, Qt.KeepAspectRatio)
 
     def drawBackground(self, painter, rect):
