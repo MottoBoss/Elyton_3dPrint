@@ -157,6 +157,60 @@ mm vs inches).
 
 ---
 
+## Tab 3: Machine Control
+
+Replaces the Mainsail workflow. The board stays on Klipper; the app talks HTTP to
+**Moonraker** (Klipper's API service, running wherever Mainsail runs — for us,
+this laptop). Nothing to reflash.
+
+### Connecting
+
+Enter the Moonraker address and hit **Connect**. Default is
+`http://localhost:7125`; if you give a bare host (like just `localhost`), the
+app tries port 7125 automatically. The status label shows klippy's state and,
+once connected, the current print state. The address is remembered between runs.
+
+**E-STOP** halts klippy instantly (motors dead, print gone). Klipper then refuses
+everything until you press **FW restart**. That's Klipper by design.
+
+### Jog / home / zero
+
+- **X±/Y±/Z±** buttons with a step selector (0.1 / 1 / 10 mm). Jogs are sent as
+  **absolute** moves (the app reads the current position, then commands
+  position+step) — this app never sends G91, anywhere.
+- Klipper refuses to move before homing — so **Home all** or **Home XY** first;
+  the error message shows in the console if you forget.
+- **Set origin here (G92 X0 Y0 Z0)**: our standard workflow — jog the tip to
+  the bottom-left corner of where the artwork goes, at cutting height, then
+  press this. All generated G-code assumes exactly that origin.
+
+### Running a program
+
+1. **Load .gcode…** — the file automatically opens in the Simulator tab so you
+   can inspect and play it back first ("View in Simulator" re-opens it any time).
+2. **▶ Run** uploads the file to Moonraker and starts it.
+3. Progress bar plus *line N of M, %, elapsed, remaining*, and live X/Y/Z
+   position, all polled from klippy every 0.7 s.
+4. **⏸ Pause / ▶ Resume** map to Klipper's pause/resume.
+5. **■ Stop (safe lift)** cancels the print, then lifts Z by 2 mm (absolute
+   move from the current reported position).
+
+### Console
+
+Type raw G-code, Enter sends it. The log shows what you sent plus klippy's
+responses/errors (polled from Moonraker's gcode store — the same stream
+Mainsail's console shows).
+
+### Z gap / current panel (stub)
+
+Placeholder for the future custom Z PCB that will sense current and hold the
+tip-to-metal gap. The panel reads from a pluggable data source; today only a
+**Mock PCB** source exists (fake sine-wave data proving the display works).
+When the real PCB arrives, we add one class to `datasources.py` with a
+`read()` method for whatever transport it speaks — nothing else changes.
+
+---
+
 ## Files
 
 | File | What it is |
@@ -167,11 +221,16 @@ mm vs inches).
 | `gcodesim.py` | Pure parser/analyzer: G-code → absolute moves + warnings. |
 | `simulator.py` | Simulator tab UI + playback. |
 | `pathview.py` | Shared mm-unit canvas (grid, origin, zoom/pan). |
-| `test_toolpath.py`, `test_gcodesim.py` | Self-checks, no hardware needed. |
+| `machine.py` | Moonraker HTTP client (stdlib only). |
+| `sender.py` | Machine Control tab UI. |
+| `datasources.py` | Interface + mock for the future Z-PCB current/gap feed. |
+| `test_toolpath.py`, `test_gcodesim.py`, `test_machine.py` | Self-checks, no hardware needed. |
 | `examples/` | Reference outputs, incl. the drifted G91 file the simulator flags. |
 
-## Coming in Phase 3
+## If we ever switch to Marlin
 
-Machine control tab: direct sender for the SKR Mini E3 V3.0 (connect, jog, home,
-zero, run with progress/pause/abort, raw G-code console) plus a stubbed live
-current/gap panel for the future custom Z PCB.
+Reflashing the SKR Mini E3 V3.0 to Marlin would let the app drive the board
+directly over USB serial (pyserial, ok/ack flow control) with no Moonraker in
+the middle. The sender's actions all go through `machine.py`'s small client
+class, so that switch means writing one `MarlinClient` with the same methods —
+the UI doesn't change.

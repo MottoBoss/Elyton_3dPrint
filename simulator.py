@@ -114,6 +114,12 @@ class SimulatorTab(QWidget):
         self.src = "clipboard"
         self.reload()
 
+    def load_text(self, text, name):
+        """Programmatic load (used by the sender's 'View in Simulator')."""
+        self.text = text
+        self.src = name
+        self.reload()
+
     def reload(self):
         if not getattr(self, "text", None):
             return
