@@ -18,8 +18,7 @@ from PySide6.QtWidgets import (
 from datasources import MockGapSource
 from machine import MoonrakerClient, MoonrakerError
 
-Z_LIFT_ON_ABORT = 2.0
-JOG_FEED_XY, JOG_FEED_Z = 1600, 600
+JOG_FEED_XY, JOG_FEED_Z = 1600, 600  # mm/min, what G-code F words want
 
 
 class _Sig(QObject):
@@ -123,6 +122,13 @@ class SenderTab(QWidget):
         g.addWidget(self.btn_home, 4, 0, 1, 2)
         g.addWidget(self.btn_homexy, 4, 2, 1, 2)
         g.addWidget(self.btn_zero, 5, 0, 1, 4)
+        self.btn_ecm_on = QPushButton("ECM on")
+        self.btn_ecm_on.clicked.connect(lambda: self._script("ecm_on", "ecm_on"))
+        self.btn_ecm_off = QPushButton("ECM off")
+        self.btn_ecm_off.setStyleSheet("font-weight:bold")
+        self.btn_ecm_off.clicked.connect(lambda: self._script("ecm_off", "ecm_off"))
+        g.addWidget(self.btn_ecm_on, 6, 0, 1, 2)
+        g.addWidget(self.btn_ecm_off, 6, 2, 1, 2)
 
         runbox = QGroupBox("Program")
         v = QVBoxLayout(runbox)
@@ -138,7 +144,7 @@ class SenderTab(QWidget):
         self.btn_run.clicked.connect(self._run)
         self.btn_pause = QPushButton("⏸ Pause")
         self.btn_pause.clicked.connect(self._pause_resume)
-        self.btn_stop = QPushButton("■ Stop (safe lift)")
+        self.btn_stop = QPushButton("■ Stop (ECM off)")
         self.btn_stop.clicked.connect(self._stop)
         row = QHBoxLayout()
         row.addWidget(self.btn_run)
@@ -208,7 +214,8 @@ class SenderTab(QWidget):
     def _set_connected(self, on):
         for w in (self.btn_home, self.btn_homexy, self.btn_zero, self.btn_run,
                   self.btn_pause, self.btn_stop, self.btn_estop,
-                  self.btn_fwrestart, self.ed_cmd):
+                  self.btn_fwrestart, self.btn_ecm_on, self.btn_ecm_off,
+                  self.ed_cmd):
             w.setEnabled(on)
         jog_grid = self.findChildren(QPushButton)
         for b in jog_grid:
@@ -316,10 +323,15 @@ class SenderTab(QWidget):
     def _pause_resume(self):
         if not self.cli:
             return
+        cli = self.cli
         if self.state == "paused":
-            self._cmd(self.cli.resume, "resume")
-        else:
-            self._cmd(self.cli.pause, "pause")
+            self._cmd(cli.resume, "resume")  # the file's next ecm_on re-energizes
+            return
+
+        def work():  # a paused run must not sit there etching a pit
+            cli.pause()
+            cli.gcode("ecm_off")
+        self._cmd(work, "pause (+ ecm_off)")
 
     def _stop(self):
         if not self.cli:
@@ -327,10 +339,9 @@ class SenderTab(QWidget):
         cli = self.cli
 
         def work():
-            cli.cancel()
-            z = cli.query()["gcode_move"]["gcode_position"][2]
-            cli.gcode(f"G90\nG1 Z{z + Z_LIFT_ON_ABORT:.2f} F{JOG_FEED_Z}")
-        self._cmd(work, "STOP (cancel + safe Z lift)")
+            cli.cancel()          # first: cancelling clears the queued moves
+            cli.gcode("ecm_off")  # then de-energize; a queued ecm_off would wait
+        self._cmd(work, "STOP (cancel + ecm_off)")
 
     # ---------------- polling ----------------
     def _poll(self):

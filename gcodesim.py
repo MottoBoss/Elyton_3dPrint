@@ -26,11 +26,23 @@ def parse(text):
     absolute = True      # Marlin/Klipper default
     scale = 1.0          # 25.4 in G20 mode
     feed = 1600.0        # fallback if the file never sets F
-    flags = {"g90": False, "g91": False, "g20": False, "g21": False}
+    flags = {"g90": False, "g91": False, "g20": False, "g21": False,
+             "ecm_on": 0, "ecm_off": 0, "ecm_live": False, "ecm_repeat": [],
+             "elyton": False}
     moves = []
     unsupported = {}
     for line_no, raw in enumerate(text.splitlines(), 1):
+        if raw.lstrip().startswith("; Elyton ECM"):
+            flags["elyton"] = True  # our own generator's header
         line = re.sub(r"\([^)]*\)", "", raw.split(";", 1)[0])
+        low = line.strip().lower()
+        if low in ("ecm_on", "ecm_off"):  # our cut gate; Z stays put
+            on = low == "ecm_on"
+            if flags["ecm_on"] + flags["ecm_off"] and on is flags["ecm_live"]:
+                flags["ecm_repeat"].append(line_no)
+            flags[low] += 1
+            flags["ecm_live"] = on
+            continue
         words = WORD.findall(line)
         if not words:
             continue
@@ -103,7 +115,7 @@ def loop_drift(moves, tol=0.05):
 def analyze(moves, flags, unsupported, *, bed=(220.0, 220.0), z_band=None):
     """Stats dict + list of warning strings. z_band=(lo, hi) expected Z range."""
     st = {"cut_mm": 0.0, "travel_mm": 0.0, "z_mm": 0.0, "minutes": 0.0,
-          "cuts": 0, "rapids": 0, "extents": None,
+          "cuts": 0, "rapids": 0, "extents": None, "ecm_cycles": flags["ecm_on"],
           "mode": ("G91 RELATIVE" if flags["g91"] else "G90 absolute")
                   + (", inches (G20)" if flags["g20"] else ", mm")}
     warnings = []
@@ -132,13 +144,23 @@ def analyze(moves, flags, unsupported, *, bed=(220.0, 220.0), z_band=None):
     st["size"] = (w, h)
     st["z_range"] = (min(zs), max(zs))
 
-    if flags["g91"]:
+    if flags["g91"] and not flags["elyton"]:
+        # our own generator computes deltas from the commanded position and closes
+        # the program out at the origin, so G91 in our files is not news
         warnings.append("Relative mode (G91) detected - we were burned by this "
                         "before. Verify the loops below.")
         bad, total, drift = loop_drift(moves)
         if bad:
             warnings.append(f"{bad} of {total} cut loops do not close; "
                             f"accumulated drift {drift:.2f} mm.")
+    if flags["ecm_live"]:
+        warnings.append("Program ends with the ECM ON - no ecm_off after the "
+                        "last cut. Do not run this.")
+    if flags["ecm_repeat"]:
+        at = ", ".join(str(n) for n in flags["ecm_repeat"][:5])
+        warnings.append(f"{len(flags['ecm_repeat'])} back-to-back ECM toggle(s) "
+                        f"(same state twice) at line {at} - the controller cannot "
+                        f"take that. Do not run this.")
     if not flags["g21"] and not flags["g20"]:
         warnings.append("No units command (G20/G21) - assuming millimeters.")
     if w > bed[0] or h > bed[1]:

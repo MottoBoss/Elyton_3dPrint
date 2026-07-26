@@ -149,6 +149,7 @@ class SimulatorTab(QWidget):
                 f"Cut {st['cut_mm']:.0f} mm in {st['cuts']} segments\n"
                 f"Travel {st['travel_mm']:.0f} mm in {st['rapids']} rapids"
                 f"   |   Z motion {st['z_mm']:.0f} mm\n"
+                f"ECM on/off cycles: {st['ecm_cycles']}\n"
                 f"Estimated time: {t}   |   Mode: {st['mode']}")
         else:
             self.lbl_stats.setText("")

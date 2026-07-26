@@ -59,6 +59,24 @@ def main():
     moves, flags, _ = gs.parse("G20\nG90\nG0 X0 Y0\nG1 X1 Y0 F60")
     assert abs(moves[-1].p1[0] - 25.4) < 1e-9
 
+    # ECM gating: cycles counted, and an unterminated ecm_on is flagged
+    ecm = "G21\nG90\necm_off\nG0 X10 Y10 F1500\necm_on\nG1 X20 Y10 F60\necm_off\n"
+    st, warns = gs.analyze(*gs.parse(ecm))
+    assert st["ecm_cycles"] == 1 and not any("ECM ON" in w for w in warns)
+    assert not any("back-to-back" in w for w in warns)
+    st, warns = gs.analyze(*gs.parse(ecm.rsplit("ecm_off", 1)[0]))
+    assert any("ECM ON" in w for w in warns)
+
+    # a repeated gate (same state twice running) is fatal to the controller
+    st, warns = gs.analyze(*gs.parse(ecm.replace("ecm_on", "ecm_on\necm_on")))
+    assert any("back-to-back" in w and "line 6" in w for w in warns), warns
+
+    # G91 from our own generator is expected; from anywhere else it is a caution
+    rel = "; Elyton ECM - RASTER FILL\nG21\nG91\necm_off\nG0 X10 Y10 F1500\n"
+    assert not any("Relative" in w for w in gs.analyze(*gs.parse(rel))[1])
+    assert any("Relative" in w for w in
+               gs.analyze(*gs.parse(rel.replace("; Elyton ECM - RASTER FILL", "")))[1])
+
     # G92 offsets, G91 G1 on one line, bed/Z warnings
     moves, flags, unsup = gs.parse("G92 X100\nG91 G1 X5 F60\nG1 Z-30 F60")
     assert moves[0].p0[0] == 100 and moves[0].p1[0] == 105

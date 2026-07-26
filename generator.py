@@ -15,6 +15,13 @@ import toolpath as tp
 from pathview import PathView
 
 INK_MODES = ["auto", "dark", "alpha"]
+MODES = ["raster", "contour", "trace"]
+MODE_LABELS = ["Raster fill (boustrophedon)",
+               "Contour fill (offsets, fewest ECM toggles)",
+               "Trace outline (contours)"]
+MODE_TITLES = {"raster": "RASTER FILL (boustrophedon)",
+               "contour": "CONTOUR FILL (concentric offsets)",
+               "trace": "TRACE OUTLINE (contour centerlines)"}
 
 
 def load_rgba(path):
@@ -102,9 +109,9 @@ class GeneratorTab(QWidget):
 
         tool = QGroupBox("Tool && path")
         f = QFormLayout(tool)
-        self.spn_tool = self._dspin(0.1, 10, 1.27, " mm", step=0.01, dec=2)
+        self.spn_tool = self._dspin(0.1, 10, 1.2, " mm", step=0.01, dec=2)
         self.cmb_mode = QComboBox()
-        self.cmb_mode.addItems(["Raster fill (boustrophedon)", "Trace outline (contours)"])
+        self.cmb_mode.addItems(MODE_LABELS)
         self.spn_step = self._dspin(5, 100, 50, " %", dec=0)
         self.spn_tol = self._dspin(0.0, 2.0, 0.10, " mm", step=0.05, dec=2)
         self.chk_comp = QCheckBox("Compensate tool radius (etch stays inside artwork)")
@@ -115,20 +122,21 @@ class GeneratorTab(QWidget):
         f.addRow("Simplify tol.", self.spn_tol)
         f.addRow(self.chk_comp)
 
-        feeds = QGroupBox("Feeds && Z")
+        feeds = QGroupBox("Feeds && output")
         f = QFormLayout(feeds)
-        self.spn_cutf = self._dspin(1, 5000, 60, " mm/min", dec=0)
-        self.spn_travf = self._dspin(1, 10000, 1600, " mm/min", dec=0)
-        self.spn_ztrav = self._dspin(0, 50, 2.0, " mm", dec=2)
-        self.spn_zcut = self._dspin(-10, 50, 0.0, " mm", dec=2)
+        self.spn_cutf = self._dspin(0.01, 100, 1.0, " mm/s", step=0.1, dec=2)
+        self.spn_travf = self._dspin(0.1, 300, 25.0, " mm/s", step=1.0, dec=1)
         self.spn_passes = QSpinBox(minimum=1, maximum=99, value=1)
-        self.chk_noz = QCheckBox("Omit Z moves (pure XY, external Z control)")
+        self.chk_rel = QCheckBox("Relative moves (G91)")
+        self.chk_rel.setChecked(True)
+        self.chk_rel.setToolTip(
+            "Deltas measured from the commanded position, so rounding cannot "
+            "accumulate. Program starts and ends at (0,0).\n"
+            "Uncheck for absolute (G90) output.")
         f.addRow("Cut feed", self.spn_cutf)
         f.addRow("Travel feed", self.spn_travf)
-        f.addRow("Z travel", self.spn_ztrav)
-        f.addRow("Z cut", self.spn_zcut)
         f.addRow("Passes", self.spn_passes)
-        f.addRow(self.chk_noz)
+        f.addRow(self.chk_rel)
 
         self.btn_export = QPushButton("Export G-code…")
         self.btn_export.setEnabled(False)
@@ -177,10 +185,10 @@ class GeneratorTab(QWidget):
             lambda v: (self.lbl_thresh.setText(str(v)), self._timer.start()))
         for w in (self.cmb_ink, self.cmb_mode):
             w.currentIndexChanged.connect(kick)
-        for w in (self.chk_invert, self.chk_comp, self.chk_noz):
+        for w in (self.chk_invert, self.chk_comp, self.chk_rel):
             w.toggled.connect(kick)
         for w in (self.spn_tool, self.spn_step, self.spn_tol, self.spn_cutf,
-                  self.spn_travf, self.spn_ztrav, self.spn_zcut, self.spn_passes):
+                  self.spn_travf, self.spn_passes):
             w.valueChanged.connect(kick)
 
     @staticmethod
@@ -240,36 +248,44 @@ class GeneratorTab(QWidget):
         comp = self.chk_comp.isChecked()
         work = tp.erode_disk(mask, rx, ry) if comp else mask
 
-        raster = self.cmb_mode.currentIndex() == 0
+        mode = MODES[self.cmb_mode.currentIndex()]
         step_mm = tool * self.spn_step.value() / 100.0
-        if raster:
+        tol = self.spn_tol.value()
+        if mode == "raster":
             paths = tp.raster_paths(work, sx, sy, step_mm)
+            geom = f"stepover {step_mm:.3f} mm ({self.spn_step.value():g}% of tool)"
+        elif mode == "contour":
+            paths = tp.offset_fill_paths(work, sx, sy, step_mm, tol)
+            geom = (f"stepover {step_mm:.3f} mm ({self.spn_step.value():g}% of tool)"
+                    f"  |  simplify tol {tol:.2f} mm")
         else:
-            paths = tp.trace_paths(work, sx, sy, self.spn_tol.value())
+            paths = tp.trace_paths(work, sx, sy, tol)
+            geom = f"simplify tol {tol:.2f} mm"
         travels = [(paths[i][-1], paths[i + 1][0]) for i in range(len(paths) - 1)]
 
+        cut_s, trav_s = self.spn_cutf.value(), self.spn_travf.value()
+        rel = self.chk_rel.isChecked()
         hdr = [
-            "Elyton ECM - " + ("RASTER FILL (boustrophedon)" if raster
-                               else "TRACE OUTLINE (contour centerlines)"),
+            "Elyton ECM - " + MODE_TITLES[mode],
             f"Source: {self.src_name}  |  Size: {w_mm:.2f} x {h_mm:.2f} mm"
             f"  |  scale {sx:.4f} mm/px",
-            f"Tool {tool:.2f} mm  |  "
-            + (f"stepover {step_mm:.3f} mm ({self.spn_step.value():g}% of tool)"
-               if raster else f"simplify tol {self.spn_tol.value():.2f} mm")
+            f"Tool {tool:.2f} mm  |  " + geom
             + f"  |  radius-compensated: {'yes' if comp else 'no'}",
-            f"Cut F{self.spn_cutf.value():g}  |  Travel F{self.spn_travf.value():g}"
-            f"  |  Z travel {self.spn_ztrav.value():.2f}  |  Z cut {self.spn_zcut.value():.2f}"
-            f"  |  Passes: {self.spn_passes.value()}",
-            "ABSOLUTE (G90), millimeters (G21). Origin (0,0) = bottom-left of artwork box, Y up.",
+            f"Cut {cut_s:g} mm/s (F{cut_s * 60:g})  |  "
+            f"Travel {trav_s:g} mm/s (F{trav_s * 60:g})"
+            f"  |  Passes: {self.spn_passes.value()}"
+            f"  |  ECM cycles: {len(paths) * self.spn_passes.value()}",
+            ("RELATIVE (G91), millimeters (G21). Deltas are measured from the "
+             "commanded position, so they cannot drift."
+             if rel else
+             "ABSOLUTE (G90), millimeters (G21)."),
+            "Starts and ends at (0,0) = bottom-left of the artwork box, Y up, ECM off.",
+            "No Z motion: the cut is gated by ecm_on / ecm_off, not by Z.",
             f"Generated {datetime.date.today().isoformat()} by Elyton ECM",
         ]
-        if self.chk_noz.isChecked():
-            hdr.append("XY only - Z moves omitted (external Z control)")
         self.gcode_text, st = tp.emit_gcode(
-            paths, cut_feed=self.spn_cutf.value(), travel_feed=self.spn_travf.value(),
-            z_travel=self.spn_ztrav.value(), z_cut=self.spn_zcut.value(),
-            passes=self.spn_passes.value(), omit_z=self.chk_noz.isChecked(),
-            header_lines=hdr)
+            paths, cut_feed=cut_s, travel_feed=trav_s, relative=rel,
+            passes=self.spn_passes.value(), header_lines=hdr)
 
         self.view.set_paths(paths, travels, tool)
 
@@ -289,8 +305,8 @@ class GeneratorTab(QWidget):
         t = f"{m:.1f} min" if m < 90 else f"{m / 60:.1f} h"
         self.lbl_stats.setText(
             f"Output: {w_mm:.2f} x {h_mm:.2f} mm   |   {st['paths']} paths\n"
-            f"Cut {st['cut_mm']:.0f} mm   travel {st['travel_mm']:.0f} mm"
-            f"   Z {st['z_mm']:.0f} mm\nEstimated time: {t}"
+            f"Cut {st['cut_mm']:.0f} mm   travel {st['travel_mm']:.0f} mm\n"
+            f"ECM on/off cycles: {st['ecm_cycles']}\nEstimated time: {t}"
             + (f"  ({self.spn_passes.value()} passes)" if self.spn_passes.value() > 1 else ""))
 
     def _show_mask(self, mask):
@@ -303,7 +319,7 @@ class GeneratorTab(QWidget):
         if not self.gcode_text:
             return
         base = os.path.splitext(self.src_name)[0] or "output"
-        mode = "fill" if self.cmb_mode.currentIndex() == 0 else "outline"
+        mode = MODES[self.cmb_mode.currentIndex()]
         suggested = f"{base}_{mode}_{self.spn_w.value():g}mm.gcode"
         path, _ = QFileDialog.getSaveFileName(self, "Export G-code", suggested,
                                               "G-code (*.gcode);;All files (*)")

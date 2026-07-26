@@ -2,8 +2,24 @@
 
 Desktop app for our ECM-converted Ender 3. The electrode never touches the metal:
 depth comes from **dwell time and current**, not commanded Z. Feed rate is the depth
-knob (slower feed = deeper etch). Z is only used two ways: lift +2 mm to travel,
-drop to Z0 to cut.
+knob (slower feed = deeper etch).
+
+**Z never moves.** The cut is switched electrically, not geometrically: `ecm_on`
+before a cut stretch, `ecm_off` before every rapid. Generated programs contain no Z
+word at all — you park the tip at the working gap once and it stays there.
+
+> Requires the `ecm_on` / `ecm_off` macros to exist in the Klipper config. Give the
+> output pin a `shutdown_value` of off so an E-STOP or klippy error de-energizes it —
+> the app can't guarantee that from the host side.
+
+All feed rates in the app are **mm/s**. G-code `F` words are mm/min (firmware has no
+mm/s mode), so the exported file shows `F60` where the UI says 1 mm/s. The header line
+prints both.
+
+Output is **relative (G91) by default**, and safely so — see
+[About relative mode](#about-relative-mode) for why, and for the checkbox that turns
+it off. Also: two `ecm_on`s or two `ecm_off`s in a row can never be emitted; the
+simulator flags them in any file that has them.
 
 ## Install & run
 
@@ -31,7 +47,7 @@ Turns an image into ECM G-code. Pipeline: image → ink mask → toolpath → G-
 
 1. **Open Image…** — PNG, JPG, BMP, GIF, or SVG. SVG is rasterized at 2000 px.
 2. Check the **Ink mask** tab on the right: dark = what will be etched.
-3. Set the output size, pick Raster or Trace, watch the **Toolpath** preview.
+3. Set the output size, pick a mode, watch the **Toolpath** preview.
 4. Fix any orange warning, then **Export G-code…**.
 
 ### Ink selection
@@ -53,21 +69,47 @@ Turns an image into ECM G-code. Pipeline: image → ink mask → toolpath → G-
 
 | Control | What it does |
 |---|---|
-| **Tool diameter** | Electrode tip diameter (default 1.27 mm). We swap tips — always set this. |
-| **Mode** | *Raster fill*: boustrophedon scanlines (back-and-forth, alternating direction) filling every ink region — the everyday choice for solid etching. *Trace outline*: follows the boundaries of ink regions (outer edges **and** holes) as closed loops. |
-| **Stepover** | Raster only. Scanline spacing as % of tool diameter. Default 50% = adjacent lines overlap half the tool for solid coverage. |
-| **Simplify tol.** | Trace only. Polygon simplification tolerance in mm; higher = fewer points, coarser curves. |
-| **Compensate tool radius** | **On (default)**: toolpath is inset by half the tool diameter so the *etched* result matches the artwork dimensions. Features narrower than the tool disappear (the warning below tells you how much). **Off**: the tool center rides the ink boundary — every feature grows ~0.64 mm per side with the 1.27 tip. |
+| **Tool diameter** | Syringe/electrode tip diameter (default 1.2 mm). We swap tips — always set this. |
+| **Mode** | Three ways to cover the same ink — see the table below. |
+| **Stepover** | Raster and Contour fill. Line spacing as % of tool diameter. Default 50% = adjacent lines overlap half the tool for solid coverage. |
+| **Simplify tol.** | Contour fill and Trace. Polygon simplification tolerance in mm; higher = fewer points, coarser curves. Note the chords cut *across* concave boundaries, so the etch can run up to this much outside the artwork — keep it ≤ 0.1 mm on anything with curves. |
+| **Compensate tool radius** | **On (default)**: toolpath is inset by half the tool diameter so the *etched* result matches the artwork dimensions. Features narrower than the tool disappear (the warning below tells you how much). **Off**: the tool center rides the ink boundary — every feature grows ~0.6 mm per side with the 1.2 tip. |
 
-### Feeds & Z
+### The three modes
+
+| Mode | What it does | ECM cycles |
+|---|---|---|
+| **Raster fill** | Boustrophedon scanlines (back-and-forth, alternating direction) across every ink region. Simple and predictable, but the ECM switches off and on at the end of every single scanline. | one per scanline (hundreds) |
+| **Contour fill** | Same solid result, built the other way round: trace the outline, then step inward one stepover at a time — concentric rings until the region is used up. It always walks to the *nearest* ring left, so it spirals inward, and the hop from one ring to the next **stays ECM-on** — it's a stepover-long move through material that was getting etched anyway. | one per region (a handful) |
+| **Trace outline** | Boundaries only, no fill: outer edges **and** holes as closed loops. | one per loop |
+
+A run only breaks (ECM off, rapid, ECM on) when the next ring is somewhere the tool
+can't reach with the current on: a separate region, across a gap, or simply further
+than two stepovers away. That last rule matters — a long ECM-on hop crosses ground
+that has already been etched and deepens it, so the generator would rather spend a
+cycle than leave a double-depth scar across your part. (`HOP_STEPOVERS` in
+`toolpath.py` if you ever want the opposite trade.)
+
+Pick **Contour fill** unless you have a reason not to. Measured on a 45 mm logo with
+a hole in it: **95 ECM cycles → 6**, rapid distance cut to a tenth, and *more* ink
+covered (99.8% vs 97.0%, since rings follow the outline instead of stair-stepping
+it).
+
+What it costs is cut distance, and how much depends on the artwork: **5–15% on solid
+shapes** (big fills, plates, blobs), but **up to ~2× on thin strokes** — text and line
+art, where every stroke has both of its edges traced instead of a few scanlines
+crossing it. So on a text logo, contour fill means ~20× fewer ECM cycles for roughly
+double the run time. The generator prints both numbers (ECM cycles and estimated
+time) before you export — check them and decide per job.
+
+### Feeds
 
 | Control | What it does |
 |---|---|
-| **Cut feed** | F for cutting moves (default 60 mm/min). This is the depth knob: slower = more dwell = deeper. |
-| **Travel feed** | F for rapids, plunges, lifts (default 1600). |
-| **Z travel / Z cut** | Lift height (2 mm) and cutting height (0). |
+| **Cut feed** | Speed of cutting moves in **mm/s** (default 1.0 → `F60`). This is the depth knob: slower = more dwell = deeper. |
+| **Travel feed** | Speed of rapids in **mm/s** (default 25 → `F1500`). |
 | **Passes** | Repeats the whole program N times for more dwell/depth. |
-| **Omit Z moves** | Emits pure XY G-code — for when the future Z-gap PCB owns the Z axis. |
+| **Relative moves (G91)** | **On by default.** Every move is a delta. Uncheck for absolute (G90) output. See below — this is safe here, and it is safe for a specific reason. |
 
 ### Preview
 
@@ -88,22 +130,53 @@ as the ink area lost to a morphological opening by the tool disk.
 Every exported file follows our conventions:
 
 ```
-; Elyton ECM - RASTER FILL (boustrophedon)
+; Elyton ECM - CONTOUR FILL (concentric offsets)
 ; Source: logo.png  |  Size: 45.00 x 9.53 mm  |  scale 0.0920 mm/px
-; Tool 1.27 mm  |  stepover 0.635 mm (50% of tool)  |  radius-compensated: yes
-; Cut F60  |  Travel F1600  |  Z travel 2.00  |  Z cut 0.00  |  Passes: 1
-; ABSOLUTE (G90), millimeters (G21). Origin (0,0) = bottom-left of artwork box, Y up.
+; Tool 1.20 mm  |  stepover 0.600 mm (50% of tool)  |  simplify tol 0.10 mm  |  radius-compensated: yes
+; Cut 1 mm/s (F60)  |  Travel 25 mm/s (F1500)  |  Passes: 1  |  ECM cycles: 3
+; RELATIVE (G91), millimeters (G21). Deltas are measured from the commanded position, so they cannot drift.
+; Starts and ends at (0,0) = bottom-left of the artwork box, Y up, ECM off.
+; No Z motion: the cut is gated by ecm_on / ecm_off, not by Z.
 G21
-G90
+G91
+ecm_off
+G0 X3.456 Y10.842 F1500
+ecm_on
+G1 X0.635 Y0.000 F60
 ...
+ecm_off
+G0 X-14.231 Y-8.402 F1500  ; back to start
 ```
 
-**Always absolute (G90), always mm (G21).** The app will never emit relative mode —
-a G91 file once drifted our toolpath over a meter sideways. Each cut segment is:
-rapid to start at Z travel → plunge → cut at cut feed → lift.
+Each cut stretch is: `ecm_off` → rapid to the start → `ecm_on` → cut at cut feed →
+`ecm_off`. The file opens with `ecm_off`, ends with `ecm_off`, closes with a rapid
+back to (0,0), and contains no Z word anywhere. **The gates always alternate** —
+`ecm_on` twice running (or `ecm_off` twice) is impossible by construction, because
+every toggle goes through one state-tracking function that drops a redundant one.
+
+### About relative mode
+
+We got burned by G91 once: a file drifted the toolpath over a meter sideways. That
+happened because each move's delta was measured from where the tool was *supposed*
+to be, then rounded to 3 decimals — so every move donated up to half a micron of
+error to a total that never got corrected.
+
+This generator measures each delta from the position the **machine believes it is
+at**: the running sum of the deltas already sent, at the same 3 decimals the file
+carries. Any rounding is therefore corrected by the very next move. Measured over
+200 passes of a real toolpath, error stays flat at **0.475 µm**; the old way reaches
+0.2 mm and keeps climbing. `test_toolpath.py` re-parses the generated G91 with the
+simulator's own parser and fails if a single point lands more than 1 nm away from
+the absolute-mode output.
+
+Uncheck **Relative moves** for plain G90 if you ever want it — the geometry is
+identical, and the simulator will tell you so.
 
 Zero the machine with the tip at the **bottom-left corner of where the artwork box
-should sit** on the plate, at cutting height.
+should sit** on the plate, at the working gap. Z is where you leave it. In relative
+mode that corner is the *only* reference the file has, so set it before every run —
+and because the program returns there when it finishes, you can run it twice without
+re-zeroing.
 
 ---
 
@@ -115,7 +188,8 @@ before the machine runs it.
 ### Loading
 
 - **Open .gcode…** or **Paste from clipboard**.
-- Parses G0/G1 (X/Y/Z/F), G90/**G91**, G20/G21, G92, G28, `;` and `()` comments.
+- Parses G0/G1 (X/Y/Z/F), G90/**G91**, G20/G21, G92, G28, `ecm_on`/`ecm_off`,
+  `;` and `()` comments.
   Everything is reconstructed to absolute mm, so relative or inch files render
   correctly. Arcs (G2/G3) are not rendered — you'll get a warning listing what
   was skipped.
@@ -126,23 +200,32 @@ before the machine runs it.
 |---|---|
 | **Tool width** | Diameter used to draw cut moves (visual only). |
 | **Bed W / H** | Machine travel (default 220×220). The check fires if the toolpath is bigger than this. |
-| **Expected Z cut / travel** | Our Z convention (0 / 2). Any Z outside this band ±0.5 mm triggers a warning — catches plunges into the plate and runaway lifts. |
+| **Expected Z cut / travel** | Only matters for third-party files that do move Z (0 / 2 is the old convention). Our own files have no Z at all, so they sit at 0 and never trip it. |
 
 ### Stats readout
 
 Extents (W×H mm plus X/Y min..max), Z range, cut distance and segment count,
-travel distance and rapid count, total Z motion, estimated run time (from the
-file's own feed rates), and the detected mode (G90 absolute vs **G91 RELATIVE**,
-mm vs inches).
+travel distance and rapid count, total Z motion, **ECM on/off cycles**, estimated
+run time (from the file's own feed rates), and the detected mode (G90 absolute vs
+**G91 RELATIVE**, mm vs inches).
 
 ### Warnings it catches
 
-- **Relative mode (G91)** — always flagged as a caution.
-- **Open loops in relative files** — in a well-formed program each plunge…lift
+- **Relative mode (G91)** — flagged as a caution for *third-party* files. Suppressed
+  for files carrying our own `; Elyton ECM` header, since those compute their deltas
+  drift-free and close out at the origin. Check the reconstructed extents in the
+  stats readout if you want to confirm it for yourself.
+- **Back-to-back ECM toggles** — two `ecm_on` (or two `ecm_off`) in a row, with the
+  line numbers. Our generator cannot produce these; a hand-edited or spliced file
+  can, and the controller does not survive it.
+- **Open loops in relative files** — needs Z plunges to detect, so it only fires on
+  older/third-party files. In a well-formed one each plunge…lift
   group returns to its start point. The simulator reports how many loops don't
   close and the **accumulated drift** in mm. (Run
   `examples/elyton_logo_contour_parallel_mirrored_corrected.gcode` to see the
   real incident: 91 open loops, ~960 mm of drift.)
+- **Program ends with the ECM ON** — an `ecm_on` with no `ecm_off` after the last
+  cut. Never run that file; fix the generator or the file first.
 - **Toolpath exceeds bed travel.**
 - **Z outside the expected cut/travel band.**
 - **No units command** (assumes mm).
@@ -171,7 +254,9 @@ app tries port 7125 automatically. The status label shows klippy's state and,
 once connected, the current print state. The address is remembered between runs.
 
 **E-STOP** halts klippy instantly (motors dead, print gone). Klipper then refuses
-everything until you press **FW restart**. That's Klipper by design.
+everything until you press **FW restart**. That's Klipper by design. It does *not*
+route through `ecm_off` — nothing host-side can outrun a shutdown, so the ECM pin
+needs its own `shutdown_value` in the Klipper config.
 
 ### Jog / home / zero
 
@@ -181,8 +266,11 @@ everything until you press **FW restart**. That's Klipper by design.
 - Klipper refuses to move before homing — so **Home all** or **Home XY** first;
   the error message shows in the console if you forget.
 - **Set origin here (G92 X0 Y0 Z0)**: our standard workflow — jog the tip to
-  the bottom-left corner of where the artwork goes, at cutting height, then
-  press this. All generated G-code assumes exactly that origin.
+  the bottom-left corner of where the artwork goes, at the working gap, then
+  press this. All generated G-code assumes exactly that origin, and never
+  touches Z again.
+- **ECM on / ECM off**: manual gate, for setup and for panic. Same macros the
+  generated files call.
 
 ### Running a program
 
@@ -191,9 +279,13 @@ everything until you press **FW restart**. That's Klipper by design.
 2. **▶ Run** uploads the file to Moonraker and starts it.
 3. Progress bar plus *line N of M, %, elapsed, remaining*, and live X/Y/Z
    position, all polled from klippy every 0.7 s.
-4. **⏸ Pause / ▶ Resume** map to Klipper's pause/resume.
-5. **■ Stop (safe lift)** cancels the print, then lifts Z by 2 mm (absolute
-   move from the current reported position).
+4. **⏸ Pause** pauses the print *and* sends `ecm_off` — a paused run would
+   otherwise stand still with current flowing and burn a pit. **▶ Resume**
+   restarts motion but does not re-energize: the etch comes back at the file's
+   next `ecm_on`, so the stretch you paused inside will be under-etched.
+5. **■ Stop (ECM off)** cancels the print, then sends `ecm_off`. Cancel goes
+   first on purpose: it clears the queued moves, whereas an `ecm_off` sent into
+   a running print would sit behind the whole remaining buffer.
 
 ### Console
 
@@ -216,7 +308,7 @@ When the real PCB arrives, we add one class to `datasources.py` with a
 | File | What it is |
 |---|---|
 | `app.py` | Entry point; the tabbed main window. |
-| `toolpath.py` | Pure generator logic: mask, compensation, raster/trace, G-code emit. |
+| `toolpath.py` | Pure generator logic: mask, compensation, raster/contour/trace, G-code emit. |
 | `generator.py` | Generator tab UI. |
 | `gcodesim.py` | Pure parser/analyzer: G-code → absolute moves + warnings. |
 | `simulator.py` | Simulator tab UI + playback. |
@@ -225,7 +317,7 @@ When the real PCB arrives, we add one class to `datasources.py` with a
 | `sender.py` | Machine Control tab UI. |
 | `datasources.py` | Interface + mock for the future Z-PCB current/gap feed. |
 | `test_toolpath.py`, `test_gcodesim.py`, `test_machine.py` | Self-checks, no hardware needed. |
-| `examples/` | Reference outputs, incl. the drifted G91 file the simulator flags. |
+| `examples/` | Older reference outputs (pre-ECM-gating, so they still plunge Z), incl. the drifted G91 file the simulator flags. |
 
 ## If we ever switch to Marlin
 
